@@ -49,6 +49,47 @@ divider on the battery-voltage node, into `GPIO0` (ADC1_CH0), with a
 If you see random resets around WiFi TX bursts as the battery discharges,
 add a bulk capacitor (100–470µF) across 5V/GND or 3V3/GND near the board.
 
+### Wiring diagram (Waveshare variant)
+
+```mermaid
+flowchart TD
+    SOLAR[Solar Panel] --> CN3791[CN3791 MPPT<br/>Charge Controller]
+    CN3791 --> BMU[1S BMU]
+    BMU --> PACK[1S4P 18650 Pack]
+    PACK --> VBATT{{"Battery node<br/>~3.0-4.2V"}}
+
+    VBATT --> V5["Board 5V pin"]
+    VBATT --> GND(("GND / common"))
+    VBATT --> RA["220k"]
+    RA --> ADCN(("divider node"))
+    ADCN --> RB["220k"]
+    RB --> GND
+    ADCN --> GPIO0["GPIO0 (ADC1_CH0)"]
+
+    V5 --> LDO["ME6217C33M5G LDO"]
+    LDO --> V33["3V3 rail"]
+
+    V33 --> BMEVCC["BME280 VCC"]
+    GND --> BMEGND["BME280 GND"]
+    GPIO18["GPIO18 (SDA)"] --> BMESDA["BME280 SDA"]
+    GPIO19["GPIO19 (SCL)"] --> BMESCL["BME280 SCL"]
+
+    GPIO2["GPIO2 (Fan PWM)"] -->|330R| BASE["2N2222 Base"]
+    BASE --> Q1(("2N2222"))
+    Q1 -->|Collector| FANNEG["Fan −"]
+    Q1 -->|Emitter| GND
+    V5 --> FANPOS["Fan +"]
+```
+
+- **Power path** (left branch): solar → CN3791 MPPT → 1S BMU → 18650 pack. The
+  battery node feeds the board's **5V pin** (not 3V3 — see above) and, through
+  the 220k/220k divider, `GPIO0` for voltage sensing.
+- **BME280**: `3V3`/`GND` for power, `GPIO18`/`GPIO19` for I2C.
+- **Fan**: `GPIO2` drives the 2N2222 base through a 330Ω resistor; the
+  transistor switches the fan's ground return, with the fan's positive lead
+  tied to 5V.
+- All `GND`/`GND common` nodes in the diagram are the same net.
+
 ## Fan cooling
 
 Both variants drive a 2N2222-switched cooling fan (base via 330R, `GPIO2`)
