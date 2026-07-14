@@ -1,0 +1,150 @@
+# Target board: Seeed XIAO ESP32-C6
+# Power: XIAO's built-in LiPo charge-management IC handles USB charging and
+# battery/USB switchover in hardware. Battery voltage is sensed via an
+# external 220k/220k divider into GPIO0 (A0/D0).
+
+esphome:
+  name: garden-weather-sensor
+  friendly_name: Garden Weather Sensor
+
+esp32:
+  board: esp32-c6-devkitc-1
+  variant: esp32c6
+  framework:
+    type: esp-idf
+
+# --- WiFi ---
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  fast_connect: true   # helps battery-powered devices reconnect faster after deep sleep
+
+  ap:
+    ssid: "Garden-Weather-Fallback"
+    password: !secret fallback_password
+
+logger:
+api:
+  encryption:
+    key: !secret api_encryption_key
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+# --- I2C bus: confirmed XIAO ESP32-C6 default pins ---
+i2c:
+  sda: GPIO22   # D4
+  scl: GPIO23   # D5
+  scan: true
+
+# --- Cooling fan PWM: 2N2222 base drive via 330R, GPIO2 (D2) ---
+# GPIO2 confirmed free — not used elsewhere in this config, not a strapping pin.
+output:
+  - platform: ledc
+    pin: GPIO2
+    id: fan_pwm
+    frequency: 5000 Hz
+
+# --- BME280: temp, humidity, pressure ---
+sensor:
+  - platform: bme280_i2c
+    address: 0x76      # try 0x77 if scan: true doesn't find it at 0x76
+    temperature:
+      name: "Garden Temperature"
+      oversampling: 16x
+    pressure:
+      name: "Garden Pressure"
+      oversampling: 16x
+    humidity:
+      name: "Garden Humidity"
+      oversampling: 16x
+    update_interval: 60s
+
+  - platform: wifi_signal
+    name: "Garden Sensor WiFi Signal"
+    update_interval: 60s
+
+  - platform: adc
+    pin: GPIO0
+    name: "Garden Sensor Battery Voltage"
+    attenuation: 12db
+    filters:
+      - multiply: 2.0        # compensate for the 50% voltage divider (220k/220k)
+      - median:
+          window_size: 5
+          send_every: 5
+          send_first_at: 1
+    update_interval: 60s
+    unit_of_measurement: "V"
+    accuracy_decimals: 2
+    device_class: voltage
+    state_class: measurement
+  - platform: internal_temperature
+    name: "Garden Sensor ESP32 Temperature"
+    id: chip_temp
+    update_interval: 60s
+    entity_category: diagnostic
+    on_value:
+      then:
+        - lambda: |-
+            // Fan off below 45C, ramps 20%->100% duty between 45C and 60C,
+            // pinned at 100% at/above 60C.
+            const float TEMP_OFF   = 45.0;
+            const float TEMP_MAX   = 60.0;
+            const float DUTY_START = 0.20;
+            const float DUTY_MAX   = 1.00;
+
+            float t = x;
+            float duty = 0.0;
+
+            if (t <= TEMP_OFF) {
+              duty = 0.0;
+            } else if (t >= TEMP_MAX) {
+              duty = DUTY_MAX;
+            } else {
+              float ratio = (t - TEMP_OFF) / (TEMP_MAX - TEMP_OFF);
+              duty = DUTY_START + ratio * (DUTY_MAX - DUTY_START);
+            }
+
+            id(fan_pwm).set_level(duty);
+            id(fan_duty_pct).publish_state(duty * 100.0);
+            id(fan_duty_avg).publish_state(duty * 100.0);
+
+  - platform: template
+    name: "Garden Sensor Fan Duty"
+    id: fan_duty_pct
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    update_interval: never
+
+  # 5-minute rolling average of fan duty, for tuning the 45C/60C thresholds.
+  # chip_temp updates every 60s, so window_size 5 = 5 minutes; send_every 5
+  # means it only emits once that window fills, i.e. once every 5 minutes
+  # rather than every raw sample. Exposed to HA via the native api: above.
+  - platform: template
+    name: "Garden Sensor Fan Speed 5min Avg"
+    id: fan_duty_avg
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    update_interval: never
+    filters:
+      - sliding_window_moving_average:
+          window_size: 5
+          send_every: 5
+          send_first_at: 5
+
+
+# --- Optional: deep sleep for battery operation ---
+# Uncomment if running off LiPo rather than USB power.
+# Wakes every 5 min, reads sensor, publishes, sleeps again.
+#
+# WARNING: incompatible with the fan cooling logic above as-is. If enabled,
+# the chip is asleep for most of each cycle and won't be tracking rising
+# temperature in real time, so the fan can't respond during a thermal event.
+# Don't enable deep_sleep while active cooling is required.
+#
+# deep_sleep:
+#   run_duration: 20s
+#   sleep_duration: 5min

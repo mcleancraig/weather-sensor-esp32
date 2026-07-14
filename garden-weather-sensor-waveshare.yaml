@@ -1,0 +1,167 @@
+# Target board: Waveshare ESP32-C6-Zero
+#
+# Power: unlike the XIAO ESP32-C6, this board has NO built-in battery charge
+# management. Charging is handled externally by a CN3791 MPPT solar charge
+# controller + a 1S BMU protecting a 1S4P 18650 pack. USB is not used.
+#
+# The BMU/CN3791 output (the battery node itself, ~3.0-4.2V) is wired to the
+# board's 5V pin (+ GND) — NOT the 3V3 pin. The onboard ME6217C33M5G LDO
+# (2-6.5V in, 3.3V out, ~180mV dropout) regulates that down safely. Wiring a
+# charged 4.2V cell straight to 3V3 would exceed the ESP32-C6's absolute max
+# supply voltage.
+#
+# Battery voltage is sensed the same way as the XIAO variant: an external
+# 220k/220k divider on that same battery-voltage node, into GPIO0 (ADC1_CH0,
+# not a strapping pin on ESP32-C6).
+#
+# If you see random resets around WiFi TX bursts as the battery discharges,
+# add a bulk cap (100-470uF) across 5V/GND or 3V3/GND near the board.
+
+esphome:
+  name: garden-weather-sensor-ws
+  friendly_name: Garden Weather Sensor (Waveshare)
+
+esp32:
+  board: esp32-c6-devkitc-1
+  variant: esp32c6
+  framework:
+    type: esp-idf
+
+# --- WiFi ---
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  fast_connect: true   # helps battery-powered devices reconnect faster after deep sleep
+
+  ap:
+    ssid: "Garden-Weather-Fallback"
+    password: !secret fallback_password
+
+logger:
+api:
+  encryption:
+    key: !secret api_encryption_key
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+# --- I2C bus ---
+# GPIO22/GPIO23 (the XIAO's I2C default) are NOT free on this board — they're
+# hardwired to the onboard WS2812 RGB LED (RGB_PWR / RGB_DATA). Moved to
+# GPIO18/GPIO19: free, not strapping pins, not JTAG, not used elsewhere.
+i2c:
+  sda: GPIO18
+  scl: GPIO19
+  scan: true
+
+# --- Cooling fan PWM: 2N2222 base drive via 330R, GPIO2 ---
+# GPIO2 confirmed free on this board too — not a strapping pin, not the RGB LED.
+output:
+  - platform: ledc
+    pin: GPIO2
+    id: fan_pwm
+    frequency: 5000 Hz
+
+# --- BME280: temp, humidity, pressure ---
+sensor:
+  - platform: bme280_i2c
+    address: 0x76      # try 0x77 if scan: true doesn't find it at 0x76
+    temperature:
+      name: "Garden Temperature"
+      oversampling: 16x
+    pressure:
+      name: "Garden Pressure"
+      oversampling: 16x
+    humidity:
+      name: "Garden Humidity"
+      oversampling: 16x
+    update_interval: 60s
+
+  - platform: wifi_signal
+    name: "Garden Sensor WiFi Signal"
+    update_interval: 60s
+
+  - platform: adc
+    pin: GPIO0
+    name: "Garden Sensor Battery Voltage"
+    attenuation: 12db
+    filters:
+      - multiply: 2.0        # compensate for the 50% voltage divider (220k/220k)
+      - median:
+          window_size: 5
+          send_every: 5
+          send_first_at: 1
+    update_interval: 60s
+    unit_of_measurement: "V"
+    accuracy_decimals: 2
+    device_class: voltage
+    state_class: measurement
+  - platform: internal_temperature
+    name: "Garden Sensor ESP32 Temperature"
+    id: chip_temp
+    update_interval: 60s
+    entity_category: diagnostic
+    on_value:
+      then:
+        - lambda: |-
+            // Fan off below 45C, ramps 20%->100% duty between 45C and 60C,
+            // pinned at 100% at/above 60C.
+            const float TEMP_OFF   = 45.0;
+            const float TEMP_MAX   = 60.0;
+            const float DUTY_START = 0.20;
+            const float DUTY_MAX   = 1.00;
+
+            float t = x;
+            float duty = 0.0;
+
+            if (t <= TEMP_OFF) {
+              duty = 0.0;
+            } else if (t >= TEMP_MAX) {
+              duty = DUTY_MAX;
+            } else {
+              float ratio = (t - TEMP_OFF) / (TEMP_MAX - TEMP_OFF);
+              duty = DUTY_START + ratio * (DUTY_MAX - DUTY_START);
+            }
+
+            id(fan_pwm).set_level(duty);
+            id(fan_duty_pct).publish_state(duty * 100.0);
+            id(fan_duty_avg).publish_state(duty * 100.0);
+
+  - platform: template
+    name: "Garden Sensor Fan Duty"
+    id: fan_duty_pct
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    update_interval: never
+
+  # 5-minute rolling average of fan duty, for tuning the 45C/60C thresholds.
+  # chip_temp updates every 60s, so window_size 5 = 5 minutes; send_every 5
+  # means it only emits once that window fills, i.e. once every 5 minutes
+  # rather than every raw sample. Exposed to HA via the native api: above.
+  - platform: template
+    name: "Garden Sensor Fan Speed 5min Avg"
+    id: fan_duty_avg
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    update_interval: never
+    filters:
+      - sliding_window_moving_average:
+          window_size: 5
+          send_every: 5
+          send_first_at: 5
+
+
+# --- Optional: deep sleep for battery operation ---
+# Uncomment if running off battery rather than continuous power.
+# Wakes every 5 min, reads sensor, publishes, sleeps again.
+#
+# WARNING: incompatible with the fan cooling logic above as-is. If enabled,
+# the chip is asleep for most of each cycle and won't be tracking rising
+# temperature in real time, so the fan can't respond during a thermal event.
+# Don't enable deep_sleep while active cooling is required.
+#
+# deep_sleep:
+#   run_duration: 20s
+#   sleep_duration: 5min
