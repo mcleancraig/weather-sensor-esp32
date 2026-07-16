@@ -68,14 +68,92 @@ sensor:
     address: 0x76      # try 0x77 if scan: true doesn't find it at 0x76
     temperature:
       name: "Garden Temperature"
+      id: bme_temperature
       oversampling: 16x
     pressure:
       name: "Garden Pressure"
+      id: bme_pressure
       oversampling: 16x
     humidity:
       name: "Garden Humidity"
       oversampling: 16x
     update_interval: 60s
+
+  # --- Sea-level-adjusted pressure ---
+  # Site elevation is 58m (looked up for this install's coordinates), so raw
+  # BME280 station pressure reads ~6-7 hPa low vs the sea-level pressure used
+  # in forecasts/synoptic charts. Reduced to sea level via the standard
+  # hypsometric formula, using the BME280's own temperature reading for the
+  # air-column correction rather than a fixed offset (the correction shifts
+  # ~1.5 hPa across a UK annual temperature range).
+  #
+  # CAL_OFFSET is a residual fudge factor for systematic differences (BME280
+  # absolute accuracy is only +/-1 hPa per datasheet, plus this site isn't
+  # exactly co-located with any reference station). Compare this sensor's
+  # output against weather.met_office_barnet (or another local MSLP source)
+  # over a few days and adjust CAL_OFFSET to zero out any consistent gap.
+  - platform: template
+    name: "Garden Sea Level Pressure"
+    id: sea_level_pressure
+    unit_of_measurement: "hPa"
+    accuracy_decimals: 2
+    device_class: pressure
+    state_class: measurement
+    update_interval: 60s
+    lambda: |-
+      const float ELEVATION_M = 58.0;
+      const float CAL_OFFSET  = 0.0;
+
+      float p = id(bme_pressure).state;
+      float t = id(bme_temperature).state;
+      if (isnan(p) || isnan(t)) return {};
+
+      float denom  = t + 0.0065 * ELEVATION_M + 273.15;
+      float factor = pow(1.0 - (0.0065 * ELEVATION_M) / denom, -5.257);
+      return p * factor + CAL_OFFSET;
+    on_value:
+      then:
+        - lambda: |-
+            // 1-hour pressure tendency: ring buffer of the last 60 one-minute
+            // samples of sea-level pressure. Once full, delta = now - 1h ago.
+            // Thresholds are the classic 3-hour synoptic tendency bands
+            // (slow/moderate/quick/rapid), scaled down to a 1-hour window.
+            static float history[60] = {};
+            static int idx = 0;
+            static int count = 0;
+
+            float current = x;
+            float delta = NAN;
+            if (count >= 60) {
+              delta = current - history[idx];
+            }
+            history[idx] = current;
+            idx = (idx + 1) % 60;
+            if (count < 60) count++;
+
+            if (!isnan(delta)) {
+              id(pressure_trend_1h).publish_state(delta);
+
+              float mag = fabs(delta);
+              std::string dir = delta < 0 ? "Falling" : "Rising";
+              std::string category;
+              if (mag < 0.5) category = "Steady";
+              else if (mag < 1.2) category = dir + " slowly";
+              else if (mag < 2.0) category = dir;
+              else if (mag < 3.3) category = dir + " quickly";
+              else category = dir + " very rapidly";
+
+              id(pressure_trend_category).publish_state(category);
+            }
+
+  - platform: template
+    name: "Garden Sea Level Pressure Trend (1h)"
+    id: pressure_trend_1h
+    unit_of_measurement: "hPa/h"
+    accuracy_decimals: 2
+    icon: mdi:trending-up
+    entity_category: diagnostic
+    update_interval: never
 
   - platform: wifi_signal
     name: "Garden Sensor WiFi Signal"
@@ -151,6 +229,15 @@ sensor:
           window_size: 5
           send_every: 5
           send_first_at: 5
+
+text_sensor:
+  # Human-readable 1h pressure tendency, derived from the same ring buffer as
+  # the "Garden Sea Level Pressure Trend (1h)" numeric sensor above.
+  - platform: template
+    name: "Garden Pressure Trend"
+    id: pressure_trend_category
+    icon: mdi:weather-partly-rainy
+    update_interval: never
 
 
 # --- Optional: deep sleep for battery operation ---
