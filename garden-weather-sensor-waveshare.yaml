@@ -236,10 +236,18 @@ sensor:
     on_value:
       then:
         - lambda: |-
-            // Fan off below 45C, ramps 20%->100% duty between 45C and 60C,
-            // pinned at 100% at/above 60C.
-            const float TEMP_OFF   = 45.0;
-            const float TEMP_MAX   = 60.0;
+            // Fan off below 65C, ramps 20%->100% duty between 65C and 100C,
+            // pinned at 100% at/above 100C.
+            //
+            // Raised from the original 45/60C after observing normal
+            // WiFi-driven self-heating on chip_temp (the ESP32-C6's own die
+            // sensor, not enclosure/ambient air) routinely reaching 73-78C
+            // for hours with no actual problem, and briefly 111C during a
+            // WiFi reconnect burst that resolved on its own. Chip Tj max is
+            // 125C, so 100C still leaves real margin while no longer
+            // reacting to routine radio activity.
+            const float TEMP_OFF   = 65.0;
+            const float TEMP_MAX   = 100.0;
             const float DUTY_START = 0.20;
             const float DUTY_MAX   = 1.00;
 
