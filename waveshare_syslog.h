@@ -11,9 +11,11 @@
 // the actual socket send (waveshare_syslog_drain) only ever runs from a
 // regular interval: component in the normal main-loop task, where it's safe.
 
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include "esphome/core/log.h"
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
 
@@ -53,12 +55,37 @@ inline void enqueue(int severity, const char *tag, const char *message) {
   head++;
 }
 
+// send_one (and therefore this diagnostic logging) is only ever reached via
+// drain(), which only ever runs from the interval: component's main-loop
+// context - a normal, safe place to call ESP_LOGW, unlike on_message.
+inline void report_send_result(int rc) {
+  static uint32_t consecutive_failures = 0;
+  static bool ever_failed = false;
+
+  if (rc < 0) {
+    consecutive_failures++;
+    ever_failed = true;
+    // Only the 1st failure and then every ~30s (150 * 200ms interval) after
+    // that, so a persistently unreachable receiver doesn't itself flood the
+    // serial/API log we actually rely on.
+    if (consecutive_failures == 1 || consecutive_failures % 150 == 0) {
+      ESP_LOGW("waveshare_syslog", "sendto() failed (errno=%d, %s), %u consecutive", errno, strerror(errno),
+               consecutive_failures);
+    }
+  } else if (ever_failed && consecutive_failures > 0) {
+    ESP_LOGI("waveshare_syslog", "sendto() recovered after %u consecutive failures", consecutive_failures);
+    consecutive_failures = 0;
+  }
+}
+
 inline void send_one(const char *host, uint16_t port, int severity, const char *tag, const char *message) {
   static int sock = -1;
   if (sock < 0) {
     sock = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sock < 0)
+    if (sock < 0) {
+      report_send_result(-1);
       return;
+    }
   }
 
   struct sockaddr_in dest {};
@@ -71,7 +98,8 @@ inline void send_one(const char *host, uint16_t port, int severity, const char *
 
   char buf[256];
   snprintf(buf, sizeof(buf), "<%d>garden-weather-sensor-ws %s: %s", pri, tag, message);
-  ::sendto(sock, buf, strlen(buf), 0, (struct sockaddr *) &dest, sizeof(dest));
+  int rc = ::sendto(sock, buf, strlen(buf), 0, (struct sockaddr *) &dest, sizeof(dest));
+  report_send_result(rc);
 }
 
 // Only ever call this from the main loop task (e.g. an interval: component) -
