@@ -45,6 +45,12 @@ ota:
   - platform: esphome
     password: !secret ota_password
 
+# Lets HA reboot the device remotely (e.g. if it's stuck at 100% fan duty
+# and needs a clean restart) without physically opening the enclosure.
+button:
+  - platform: restart
+    name: "Garden Sensor Restart"
+
 # --- I2C bus ---
 # GPIO22/GPIO23 (the XIAO's I2C default) are NOT free on this board — they're
 # hardwired to the onboard WS2812 RGB LED (RGB_PWR / RGB_DATA). Moved to
