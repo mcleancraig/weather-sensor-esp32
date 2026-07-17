@@ -42,9 +42,14 @@ wifi:
 logger:
   level: DEBUG
   # Mirror the full log stream to the home network's syslog/Loki receiver,
-  # in addition to the normal UART/API log output. UDP is fire-and-forget,
-  # so a receiver being briefly unreachable just drops packets rather than
-  # blocking anything.
+  # in addition to the normal UART/API log output.
+  #
+  # on_message can fire from contexts where doing real network I/O isn't
+  # safe (very early boot, or from deep inside FreeRTOS/lwIP internals) - an
+  # earlier version that called the socket directly here crashed the device
+  # ("Illegal instruction" / assert failure with esp_vApplicationTickHook on
+  # the stack). So this only does a cheap, non-blocking enqueue; the actual
+  # UDP send happens from the interval: below, in the normal main-loop task.
   on_message:
     level: DEBUG
     then:
@@ -57,7 +62,14 @@ logger:
             case ESPHOME_LOG_LEVEL_CONFIG: severity = 6; break;  // syslog: Informational
             default:                       severity = 7; break; // syslog: Debug
           }
-          waveshare_send_syslog("192.168.30.1", 514, severity, tag, message);
+          waveshare_syslog::enqueue(severity, tag, message);
+
+interval:
+  - interval: 200ms
+    then:
+      - lambda: |-
+          waveshare_syslog::drain("192.168.30.1", 514);
+
 api:
   encryption:
     key: !secret api_encryption_key
