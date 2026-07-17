@@ -39,6 +39,14 @@ wifi:
     ssid: "Garden-Weather-Fallback"
     password: !secret fallback_password
 
+# NTP time, needed for real RFC 3164 timestamps on the syslog messages
+# below (a receiver-side parser rejected our earlier timestamp-less
+# format entirely, confirmed via tcpdump - it reached the receiver's NIC
+# but the message was silently dropped rather than ingested).
+time:
+  - platform: sntp
+    id: sntp_time
+
 logger:
   level: DEBUG
   # Mirror the full log stream to the home network's syslog/Loki receiver,
@@ -68,7 +76,9 @@ interval:
   - interval: 200ms
     then:
       - lambda: |-
-          waveshare_syslog::drain("192.168.30.1", 514);
+          auto now = id(sntp_time).now();
+          std::string timestamp = now.is_valid() ? now.strftime("%b %e %T") : "Jan  1 00:00:00";
+          waveshare_syslog::drain("192.168.30.1", 514, timestamp.c_str());
 
 api:
   encryption:

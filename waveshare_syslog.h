@@ -111,7 +111,15 @@ inline void report_send_result(int rc) {
   }
 }
 
-inline void send_one(const char *host, uint16_t port, int severity, const char *tag, const char *message) {
+// Format: <PRI>TIMESTAMP HOSTNAME APP[PROCID]: MSG - mirrors the sibling
+// moisture-sensor-esp32 device's proven-working syslogSend() exactly
+// (same receiver/parser), rather than the earlier no-timestamp format that
+// never showed up in Loki despite reaching the receiver's NIC (confirmed
+// via tcpdump). `timestamp` is precomputed by the caller (from a real
+// NTP-synced clock, "%b %e %T" format, e.g. "Jul 17 20:11:28") since this
+// header has no ESPHome time-component dependency of its own.
+inline void send_one(const char *host, uint16_t port, const char *timestamp, int severity, const char *tag,
+                      const char *message) {
   static int sock = -1;
   if (sock < 0) {
     sock = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -130,14 +138,15 @@ inline void send_one(const char *host, uint16_t port, int severity, const char *
   int pri = facility * 8 + severity;
 
   char buf[256];
-  snprintf(buf, sizeof(buf), "<%d>garden-weather-sensor-ws %s: %s", pri, tag, message);
+  snprintf(buf, sizeof(buf), "<%d>%s garden-weather-sensor-ws garden-weather-sensor-ws[%s]: %s", pri, timestamp, tag,
+           message);
   int rc = ::sendto(sock, buf, strlen(buf), 0, (struct sockaddr *) &dest, sizeof(dest));
   report_send_result(rc);
 }
 
 // Only ever call this from the main loop task (e.g. an interval: component) -
 // this is where the actual socket I/O happens.
-inline void drain(const char *host, uint16_t port) {
+inline void drain(const char *host, uint16_t port, const char *timestamp) {
   while (tail != head) {
     uint32_t idx = tail % QUEUE_SIZE;
     tail++;
@@ -145,7 +154,7 @@ inline void drain(const char *host, uint16_t port) {
     if (!e.valid)
       continue;
     e.valid = false;
-    send_one(host, port, e.severity, e.tag, e.message);
+    send_one(host, port, timestamp, e.severity, e.tag, e.message);
   }
 }
 
