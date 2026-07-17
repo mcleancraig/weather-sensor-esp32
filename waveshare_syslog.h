@@ -40,6 +40,40 @@ static Entry queue[QUEUE_SIZE];
 static volatile uint32_t head = 0;
 static volatile uint32_t tail = 0;
 
+// ESPHome's logger colors terminal output using ANSI CSI escape sequences
+// (ESC '[' ... 'm'). Those raw control bytes end up in the `message` string
+// passed to on_message, and a strict syslog/Loki parser silently drops any
+// message containing them (confirmed via tcpdump: packets reach the syslog
+// receiver's NIC but never appear in Loki - the receiver rejects them at
+// the parsing stage). So strip them here rather than forwarding them.
+inline void copy_stripping_ansi(char *dst, size_t dst_size, const char *src) {
+  size_t si = 0, di = 0;
+  while (src[si] != '\0' && di + 1 < dst_size) {
+    unsigned char c = static_cast<unsigned char>(src[si]);
+    if (c == 0x1B && src[si + 1] == '[') {
+      si += 2;  // skip ESC '['
+      // skip parameter/intermediate bytes up to and including the final
+      // byte (0x40-0x7E) that ends a CSI sequence, e.g. the 'm' in \x1b[0m
+      while (src[si] != '\0' && !(static_cast<unsigned char>(src[si]) >= 0x40 && static_cast<unsigned char>(src[si]) <= 0x7E)) {
+        si++;
+      }
+      if (src[si] != '\0')
+        si++;
+      continue;
+    }
+    if (c < 0x20 || c == 0x7F) {
+      // Any other stray control byte, including a lone ESC not part of a
+      // full CSI sequence (e.g. truncated right at that boundary) - drop
+      // it rather than forward a raw control character into the message.
+      si++;
+      continue;
+    }
+    dst[di++] = static_cast<char>(c);
+    si++;
+  }
+  dst[di] = '\0';
+}
+
 // Safe to call from any context, including logger callbacks that may fire
 // from early boot or FreeRTOS/lwIP internals: no heap allocation, no
 // blocking, no networking - just copies into the next ring slot.
@@ -49,8 +83,7 @@ inline void enqueue(int severity, const char *tag, const char *message) {
   e.severity = severity;
   strncpy(e.tag, tag, sizeof(e.tag) - 1);
   e.tag[sizeof(e.tag) - 1] = '\0';
-  strncpy(e.message, message, sizeof(e.message) - 1);
-  e.message[sizeof(e.message) - 1] = '\0';
+  copy_stripping_ansi(e.message, sizeof(e.message), message);
   e.valid = true;
   head++;
 }
