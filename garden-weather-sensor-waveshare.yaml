@@ -165,6 +165,12 @@ sensor:
     name: "Garden Sensor WiFi Signal"
     update_interval: 60s
 
+  - platform: uptime
+    name: "Garden Sensor Uptime"
+    id: uptime_sensor
+    update_interval: 60s
+    entity_category: diagnostic
+
   - platform: adc
     pin: GPIO0
     name: "Garden Sensor Battery Voltage"
