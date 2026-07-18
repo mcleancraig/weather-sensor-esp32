@@ -12,6 +12,7 @@
 // regular interval: component in the normal main-loop task, where it's safe.
 
 #include <cerrno>
+#include <cinttypes>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -102,11 +103,11 @@ inline void report_send_result(int rc) {
     // that, so a persistently unreachable receiver doesn't itself flood the
     // serial/API log we actually rely on.
     if (consecutive_failures == 1 || consecutive_failures % 150 == 0) {
-      ESP_LOGW("waveshare_syslog", "sendto() failed (errno=%d, %s), %u consecutive", errno, strerror(errno),
+      ESP_LOGW("waveshare_syslog", "sendto() failed (errno=%d, %s), %" PRIu32 " consecutive", errno, strerror(errno),
                consecutive_failures);
     }
   } else if (ever_failed && consecutive_failures > 0) {
-    ESP_LOGI("waveshare_syslog", "sendto() recovered after %u consecutive failures", consecutive_failures);
+    ESP_LOGI("waveshare_syslog", "sendto() recovered after %" PRIu32 " consecutive failures", consecutive_failures);
     consecutive_failures = 0;
   }
 }
