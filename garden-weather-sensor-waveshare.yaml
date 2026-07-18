@@ -48,12 +48,7 @@ time:
     id: sntp_time
 
 logger:
-  # Dropped from DEBUG to INFO (temporary test): DEBUG includes ESP-IDF's
-  # own verbose WiFi/lwIP internals, and forwarding that volume over UDP
-  # every 200ms meant near-continuous radio TX - a plausible contributor to
-  # the chip self-heating we've been chasing, since WiFi TX activity has
-  # already correlated with chip_temp spikes earlier this investigation.
-  level: INFO
+  level: DEBUG
   # Mirror the full log stream to the home network's syslog/Loki receiver,
   # in addition to the normal UART/API log output.
   #
@@ -64,7 +59,7 @@ logger:
   # the stack). So this only does a cheap, non-blocking enqueue; the actual
   # UDP send happens from the interval: below, in the normal main-loop task.
   on_message:
-    level: INFO
+    level: DEBUG
     then:
       - lambda: |-
           int severity;
@@ -78,12 +73,7 @@ logger:
           waveshare_syslog::enqueue(severity, tag, message);
 
 interval:
-  # Dropped from 200ms to 3s (temporary test, alongside the DEBUG->INFO
-  # logger change above): cuts socket sendto() frequency ~15x, in case
-  # near-continuous UDP/radio activity was contributing to self-heating.
-  # The 32-entry ring buffer comfortably absorbs 3s of INFO-level volume
-  # (far lower than DEBUG) between drains.
-  - interval: 3s
+  - interval: 200ms
     then:
       - lambda: |-
           auto now = id(sntp_time).now();
