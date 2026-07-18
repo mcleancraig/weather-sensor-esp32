@@ -110,6 +110,18 @@ output:
     id: fan_pwm
     frequency: 5000 Hz
 
+# Manual kill switch for the fan, for testing (e.g. whether powering the
+# fan directly off the ESP itself is contributing to chip self-heating).
+# Defaults to on/restores last state across reboots - the automatic
+# thermal curve above only actually drives the fan while this is on.
+switch:
+  - platform: template
+    name: "Garden Sensor Fan Enable"
+    id: fan_enabled
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+
 # --- BME280: temp, humidity, pressure ---
 sensor:
   - platform: bme280_i2c
@@ -261,6 +273,14 @@ sensor:
             } else {
               float ratio = (t - TEMP_OFF) / (TEMP_MAX - TEMP_OFF);
               duty = DUTY_START + ratio * (DUTY_MAX - DUTY_START);
+            }
+
+            // Manual override for testing (e.g. whether powering the fan
+            // directly off the ESP itself is contributing to self-heating) -
+            // forces the fan off regardless of temperature. Reported duty
+            // reflects what's actually applied, not the computed curve.
+            if (!id(fan_enabled).state) {
+              duty = 0.0;
             }
 
             id(fan_pwm).set_level(duty);
