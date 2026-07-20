@@ -203,16 +203,6 @@ sensor:
     entity_category: diagnostic
     update_interval: never
 
-  # --- BH1750: ambient light (lux) ---
-  # Shares the existing I2C bus above (GPIO18 SDA / GPIO19 SCL) - no new
-  # wiring beyond VCC/GND, since I2C is a multi-drop bus and the BH1750's
-  # address (0x23 with ADDR tied low/floating) doesn't collide with the
-  # BME280 (0x76/0x77).
-  - platform: bh1750
-    address: 0x23      # tie BH1750 ADDR pin to GND (or leave floating) for this address; 0x5C if ADDR is tied to VCC
-    name: "Garden Illuminance"
-    update_interval: 60s
-
   - platform: wifi_signal
     name: "Garden Sensor WiFi Signal"
     update_interval: 60s
