@@ -10,6 +10,7 @@ use. Two board variants are provided.
 |---|---|---|
 | Board | Seeed XIAO ESP32-C6 | Waveshare ESP32-C6-Zero |
 | I2C (BME280) | SDA `GPIO22`, SCL `GPIO23` | SDA `GPIO18`, SCL `GPIO19` |
+| BH1750 (light) | — | Same I2C bus as BME280 (`GPIO18`/`GPIO19`), address `0x23` |
 | Fan PWM | `GPIO2` | `GPIO2` |
 | Battery ADC | `GPIO0` | `GPIO0` |
 | Battery charging | Built-in LiPo charge-management IC (charges over USB-C, auto switchover to battery) | None on-board — external CN3791 MPPT solar charge controller + 1S BMU |
@@ -74,6 +75,11 @@ flowchart TD
     GPIO18["GPIO18 (SDA)"] --> BMESDA["BME280 SDA"]
     GPIO19["GPIO19 (SCL)"] --> BMESCL["BME280 SCL"]
 
+    V33 --> BHVCC["BH1750 VCC"]
+    GND --> BHGND["BH1750 GND"]
+    GPIO18 --> BHSDA["BH1750 SDA"]
+    GPIO19 --> BHSCL["BH1750 SCL"]
+
     GPIO2["GPIO2 (Fan PWM)"] -->|330R| BASE["2N2222 Base"]
     BASE --> Q1(("2N2222"))
     Q1 -->|Collector| FANNEG["Fan −"]
@@ -85,6 +91,10 @@ flowchart TD
   battery node feeds the board's **5V pin** (not 3V3 — see above) and, through
   the 220k/220k divider, `GPIO0` for voltage sensing.
 - **BME280**: `3V3`/`GND` for power, `GPIO18`/`GPIO19` for I2C.
+- **BH1750**: `3V3`/`GND` for power, shares the same `GPIO18`/`GPIO19` I2C bus
+  as the BME280 (I2C is multi-drop — no extra GPIOs needed). Tie its `ADDR`
+  pin to `GND` (or leave floating) for the default `0x23` address, which
+  doesn't collide with the BME280's `0x76`/`0x77`.
 - **Fan**: `GPIO2` drives the 2N2222 base through a 330Ω resistor; the
   transistor switches the fan's ground return, with the fan's positive lead
   tied to 5V.
