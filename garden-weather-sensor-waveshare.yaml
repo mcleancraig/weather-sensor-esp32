@@ -21,7 +21,7 @@ esphome:
   name: garden-weather-sensor-ws
   friendly_name: Garden Weather Sensor (Waveshare)
   includes:
-    - waveshare_syslog.h
+    - syslog_forwarder.h
 
 esp32:
   board: esp32-c6-devkitc-1
@@ -70,7 +70,7 @@ logger:
             case ESPHOME_LOG_LEVEL_CONFIG: severity = 6; break;  // syslog: Informational
             default:                       severity = 7; break; // syslog: Debug
           }
-          waveshare_syslog::enqueue(severity, tag, message);
+          syslog_forwarder::enqueue(severity, tag, message);
 
 interval:
   - interval: 200ms
@@ -78,7 +78,7 @@ interval:
       - lambda: |-
           auto now = id(sntp_time).now();
           std::string timestamp = now.is_valid() ? now.strftime("%b %e %T") : "Jan  1 00:00:00";
-          waveshare_syslog::drain("192.168.30.1", 514, timestamp.c_str());
+          syslog_forwarder::drain("192.168.30.1", 514, timestamp.c_str(), "garden-weather-sensor-ws");
 
 api:
   encryption:
@@ -295,7 +295,7 @@ sensor:
     entity_category: diagnostic
     update_interval: never
 
-  # 5-minute rolling average of fan duty, for tuning the 45C/60C thresholds.
+  # 5-minute rolling average of fan duty, for tuning the 65C/100C thresholds.
   # chip_temp updates every 60s, so window_size 5 = 5 minutes; send_every 5
   # means it only emits once that window fills, i.e. once every 5 minutes
   # rather than every raw sample. Exposed to HA via the native api: above.

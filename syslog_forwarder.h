@@ -1,14 +1,16 @@
 #pragma once
 
 // Fire-and-forget UDP syslog (RFC 3164) mirroring of ESPHome's log stream.
+// Shared by both board configs (XIAO and Waveshare) - the device name used
+// in each forwarded message is passed in by the caller, not hardcoded here.
 //
 // IMPORTANT: logger's on_message trigger can fire from contexts where doing
 // actual network I/O is unsafe (very early boot, or from deep inside
 // FreeRTOS/lwIP internals - a crash was observed here with the socket call
 // made directly in on_message: "Illegal instruction" / assert failure with
 // esp_vApplicationTickHook on the stack). So on_message only does a cheap,
-// non-blocking copy into a small fixed-size ring buffer (waveshare_syslog_enqueue);
-// the actual socket send (waveshare_syslog_drain) only ever runs from a
+// non-blocking copy into a small fixed-size ring buffer (syslog_forwarder::enqueue);
+// the actual socket send (syslog_forwarder::drain) only ever runs from a
 // regular interval: component in the normal main-loop task, where it's safe.
 
 #include <cerrno>
@@ -20,7 +22,7 @@
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
 
-namespace waveshare_syslog {
+namespace syslog_forwarder {
 
 constexpr int QUEUE_SIZE = 32;
 constexpr int TAG_MAX = 24;
@@ -103,11 +105,11 @@ inline void report_send_result(int rc) {
     // that, so a persistently unreachable receiver doesn't itself flood the
     // serial/API log we actually rely on.
     if (consecutive_failures == 1 || consecutive_failures % 150 == 0) {
-      ESP_LOGW("waveshare_syslog", "sendto() failed (errno=%d, %s), %" PRIu32 " consecutive", errno, strerror(errno),
+      ESP_LOGW("syslog_forwarder", "sendto() failed (errno=%d, %s), %" PRIu32 " consecutive", errno, strerror(errno),
                consecutive_failures);
     }
   } else if (ever_failed && consecutive_failures > 0) {
-    ESP_LOGI("waveshare_syslog", "sendto() recovered after %" PRIu32 " consecutive failures", consecutive_failures);
+    ESP_LOGI("syslog_forwarder", "sendto() recovered after %" PRIu32 " consecutive failures", consecutive_failures);
     consecutive_failures = 0;
   }
 }
@@ -118,9 +120,12 @@ inline void report_send_result(int rc) {
 // never showed up in Loki despite reaching the receiver's NIC (confirmed
 // via tcpdump). `timestamp` is precomputed by the caller (from a real
 // NTP-synced clock, "%b %e %T" format, e.g. "Jul 17 20:11:28") since this
-// header has no ESPHome time-component dependency of its own.
-inline void send_one(const char *host, uint16_t port, const char *timestamp, int severity, const char *tag,
-                      const char *message) {
+// header has no ESPHome time-component dependency of its own. `device_name`
+// is likewise supplied by the caller (its ESPHome device name) so this
+// header stays reusable across boards rather than hardcoding one device's
+// identity into a shared file.
+inline void send_one(const char *host, uint16_t port, const char *timestamp, const char *device_name, int severity,
+                      const char *tag, const char *message) {
   static int sock = -1;
   if (sock < 0) {
     sock = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -139,15 +144,14 @@ inline void send_one(const char *host, uint16_t port, const char *timestamp, int
   int pri = facility * 8 + severity;
 
   char buf[256];
-  snprintf(buf, sizeof(buf), "<%d>%s garden-weather-sensor-ws garden-weather-sensor-ws[%s]: %s", pri, timestamp, tag,
-           message);
+  snprintf(buf, sizeof(buf), "<%d>%s %s %s[%s]: %s", pri, timestamp, device_name, device_name, tag, message);
   int rc = ::sendto(sock, buf, strlen(buf), 0, (struct sockaddr *) &dest, sizeof(dest));
   report_send_result(rc);
 }
 
 // Only ever call this from the main loop task (e.g. an interval: component) -
 // this is where the actual socket I/O happens.
-inline void drain(const char *host, uint16_t port, const char *timestamp) {
+inline void drain(const char *host, uint16_t port, const char *timestamp, const char *device_name) {
   while (tail != head) {
     uint32_t idx = tail % QUEUE_SIZE;
     tail++;
@@ -155,8 +159,8 @@ inline void drain(const char *host, uint16_t port, const char *timestamp) {
     if (!e.valid)
       continue;
     e.valid = false;
-    send_one(host, port, timestamp, e.severity, e.tag, e.message);
+    send_one(host, port, timestamp, device_name, e.severity, e.tag, e.message);
   }
 }
 
-}  // namespace waveshare_syslog
+}  // namespace syslog_forwarder

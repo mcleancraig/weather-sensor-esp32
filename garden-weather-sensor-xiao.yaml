@@ -6,6 +6,8 @@
 esphome:
   name: garden-weather-sensor
   friendly_name: Garden Weather Sensor
+  includes:
+    - syslog_forwarder.h
 
 esp32:
   board: esp32-c6-devkitc-1
@@ -23,13 +25,59 @@ wifi:
     ssid: "Garden-Weather-Fallback"
     password: !secret fallback_password
 
+# NTP time, needed for real RFC 3164 timestamps on the syslog messages
+# below (a receiver-side parser rejected our earlier timestamp-less
+# format entirely, confirmed via tcpdump - it reached the receiver's NIC
+# but the message was silently dropped rather than ingested).
+time:
+  - platform: sntp
+    id: sntp_time
+
 logger:
+  level: DEBUG
+  # Mirror the full log stream to the home network's syslog/Loki receiver,
+  # in addition to the normal UART/API log output.
+  #
+  # on_message can fire from contexts where doing real network I/O isn't
+  # safe (very early boot, or from deep inside FreeRTOS/lwIP internals) - an
+  # earlier version that called the socket directly here crashed the device
+  # ("Illegal instruction" / assert failure with esp_vApplicationTickHook on
+  # the stack). So this only does a cheap, non-blocking enqueue; the actual
+  # UDP send happens from the interval: below, in the normal main-loop task.
+  on_message:
+    level: DEBUG
+    then:
+      - lambda: |-
+          int severity;
+          switch (level) {
+            case ESPHOME_LOG_LEVEL_ERROR:  severity = 3; break;  // syslog: Error
+            case ESPHOME_LOG_LEVEL_WARN:   severity = 4; break;  // syslog: Warning
+            case ESPHOME_LOG_LEVEL_INFO:
+            case ESPHOME_LOG_LEVEL_CONFIG: severity = 6; break;  // syslog: Informational
+            default:                       severity = 7; break; // syslog: Debug
+          }
+          syslog_forwarder::enqueue(severity, tag, message);
+
+interval:
+  - interval: 200ms
+    then:
+      - lambda: |-
+          auto now = id(sntp_time).now();
+          std::string timestamp = now.is_valid() ? now.strftime("%b %e %T") : "Jan  1 00:00:00";
+          syslog_forwarder::drain("192.168.30.1", 514, timestamp.c_str(), "garden-weather-sensor");
+
 api:
   encryption:
     key: !secret api_encryption_key
 ota:
   - platform: esphome
     password: !secret ota_password
+
+# Lets HA reboot the device remotely (e.g. if it's stuck at 100% fan duty
+# and needs a clean restart) without physically opening the enclosure.
+button:
+  - platform: restart
+    name: "Garden Sensor Restart"
 
 # --- I2C bus: confirmed XIAO ESP32-C6 default pins ---
 i2c:
@@ -45,24 +93,120 @@ output:
     id: fan_pwm
     frequency: 5000 Hz
 
+# Manual kill switch for the fan, for testing (e.g. whether powering the
+# fan directly off the ESP itself is contributing to chip self-heating).
+# Defaults to on/restores last state across reboots - the automatic
+# thermal curve above only actually drives the fan while this is on.
+switch:
+  - platform: template
+    name: "Garden Sensor Fan Enable"
+    id: fan_enabled
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+
 # --- BME280: temp, humidity, pressure ---
 sensor:
   - platform: bme280_i2c
     address: 0x76      # try 0x77 if scan: true doesn't find it at 0x76
     temperature:
       name: "Garden Temperature"
+      id: bme_temperature
       oversampling: 16x
     pressure:
       name: "Garden Pressure"
+      id: bme_pressure
       oversampling: 16x
     humidity:
       name: "Garden Humidity"
       oversampling: 16x
     update_interval: 60s
 
+  # --- Sea-level-adjusted pressure ---
+  # Site elevation is 58m (looked up for this install's coordinates), so raw
+  # BME280 station pressure reads ~6-7 hPa low vs the sea-level pressure used
+  # in forecasts/synoptic charts. Reduced to sea level via the standard
+  # hypsometric formula, using the BME280's own temperature reading for the
+  # air-column correction rather than a fixed offset (the correction shifts
+  # ~1.5 hPa across a UK annual temperature range).
+  #
+  # CAL_OFFSET is a residual fudge factor for systematic differences (BME280
+  # absolute accuracy is only +/-1 hPa per datasheet, plus this site isn't
+  # exactly co-located with any reference station). Compare this sensor's
+  # output against weather.met_office_barnet (or another local MSLP source)
+  # over a few days and adjust CAL_OFFSET to zero out any consistent gap.
+  - platform: template
+    name: "Garden Sea Level Pressure"
+    id: sea_level_pressure
+    unit_of_measurement: "hPa"
+    accuracy_decimals: 2
+    device_class: pressure
+    state_class: measurement
+    update_interval: 60s
+    lambda: |-
+      const float ELEVATION_M = 58.0;
+      const float CAL_OFFSET  = 0.0;
+
+      float p = id(bme_pressure).state;
+      float t = id(bme_temperature).state;
+      if (isnan(p) || isnan(t)) return {};
+
+      float denom  = t + 0.0065 * ELEVATION_M + 273.15;
+      float factor = pow(1.0 - (0.0065 * ELEVATION_M) / denom, -5.257);
+      return p * factor + CAL_OFFSET;
+    on_value:
+      then:
+        - lambda: |-
+            // 1-hour pressure tendency: ring buffer of the last 60 one-minute
+            // samples of sea-level pressure. Once full, delta = now - 1h ago.
+            // Thresholds are the classic 3-hour synoptic tendency bands
+            // (slow/moderate/quick/rapid), scaled down to a 1-hour window.
+            static float history[60] = {};
+            static int idx = 0;
+            static int count = 0;
+
+            float current = x;
+            float delta = NAN;
+            if (count >= 60) {
+              delta = current - history[idx];
+            }
+            history[idx] = current;
+            idx = (idx + 1) % 60;
+            if (count < 60) count++;
+
+            if (!isnan(delta)) {
+              id(pressure_trend_1h).publish_state(delta);
+
+              float mag = fabs(delta);
+              std::string dir = delta < 0 ? "Falling" : "Rising";
+              std::string category;
+              if (mag < 0.5) category = "Steady";
+              else if (mag < 1.2) category = dir + " slowly";
+              else if (mag < 2.0) category = dir;
+              else if (mag < 3.3) category = dir + " quickly";
+              else category = dir + " very rapidly";
+
+              id(pressure_trend_category).publish_state(category);
+            }
+
+  - platform: template
+    name: "Garden Sea Level Pressure Trend (1h)"
+    id: pressure_trend_1h
+    unit_of_measurement: "hPa/h"
+    accuracy_decimals: 2
+    icon: mdi:trending-up
+    entity_category: diagnostic
+    update_interval: never
+
   - platform: wifi_signal
     name: "Garden Sensor WiFi Signal"
     update_interval: 60s
+
+  - platform: uptime
+    name: "Garden Sensor Uptime"
+    id: uptime_sensor
+    update_interval: 60s
+    entity_category: diagnostic
 
   - platform: adc
     pin: GPIO0
@@ -87,10 +231,18 @@ sensor:
     on_value:
       then:
         - lambda: |-
-            // Fan off below 45C, ramps 20%->100% duty between 45C and 60C,
-            // pinned at 100% at/above 60C.
-            const float TEMP_OFF   = 45.0;
-            const float TEMP_MAX   = 60.0;
+            // Fan off below 65C, ramps 20%->100% duty between 65C and 100C,
+            // pinned at 100% at/above 100C.
+            //
+            // Raised from the original 45/60C after observing normal
+            // WiFi-driven self-heating on chip_temp (the ESP32-C6's own die
+            // sensor, not enclosure/ambient air) routinely reaching 73-78C
+            // for hours with no actual problem, and briefly 111C during a
+            // WiFi reconnect burst that resolved on its own. Chip Tj max is
+            // 125C, so 100C still leaves real margin while no longer
+            // reacting to routine radio activity.
+            const float TEMP_OFF   = 65.0;
+            const float TEMP_MAX   = 100.0;
             const float DUTY_START = 0.20;
             const float DUTY_MAX   = 1.00;
 
@@ -106,6 +258,14 @@ sensor:
               duty = DUTY_START + ratio * (DUTY_MAX - DUTY_START);
             }
 
+            // Manual override for testing (e.g. whether powering the fan
+            // directly off the ESP itself is contributing to self-heating) -
+            // forces the fan off regardless of temperature. Reported duty
+            // reflects what's actually applied, not the computed curve.
+            if (!id(fan_enabled).state) {
+              duty = 0.0;
+            }
+
             id(fan_pwm).set_level(duty);
             id(fan_duty_pct).publish_state(duty * 100.0);
             id(fan_duty_avg).publish_state(duty * 100.0);
@@ -118,7 +278,7 @@ sensor:
     entity_category: diagnostic
     update_interval: never
 
-  # 5-minute rolling average of fan duty, for tuning the 45C/60C thresholds.
+  # 5-minute rolling average of fan duty, for tuning the 65C/100C thresholds.
   # chip_temp updates every 60s, so window_size 5 = 5 minutes; send_every 5
   # means it only emits once that window fills, i.e. once every 5 minutes
   # rather than every raw sample. Exposed to HA via the native api: above.
@@ -134,6 +294,15 @@ sensor:
           window_size: 5
           send_every: 5
           send_first_at: 5
+
+text_sensor:
+  # Human-readable 1h pressure tendency, derived from the same ring buffer as
+  # the "Garden Sea Level Pressure Trend (1h)" numeric sensor above.
+  - platform: template
+    name: "Garden Pressure Trend"
+    id: pressure_trend_category
+    icon: mdi:weather-partly-rainy
+    update_interval: never
 
 
 # --- Optional: deep sleep for battery operation ---
