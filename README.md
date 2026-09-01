@@ -4,6 +4,11 @@ ESPHome-based temperature/humidity/pressure sensor (BME280) with active fan
 cooling and battery voltage monitoring, for solar + battery powered outdoor
 use. Two board variants are provided.
 
+The **Seeed XIAO ESP32-C6** is the primary, actively-developed board. The
+**Waveshare ESP32-C6-Zero** config is kept for reference/comparison (it was
+the original build, used to investigate chip self-heating and enclosure
+airflow) but new features land on the XIAO config first.
+
 ## Board variants
 
 | | [garden-weather-sensor-xiao.yaml](garden-weather-sensor-xiao.yaml) | [garden-weather-sensor-waveshare.yaml](garden-weather-sensor-waveshare.yaml) |
@@ -15,10 +20,11 @@ use. Two board variants are provided.
 | Battery charging | Built-in LiPo charge-management IC (charges over USB-C, auto switchover to battery) | None on-board — external CN3791 MPPT solar charge controller + 1S BMU |
 | ESPHome device name | `garden-weather-sensor` | `garden-weather-sensor-ws` |
 
-Both configs share the same sensor logic, fan thermal curve, and entity
-layout — only the pins and power path differ. The device names are kept
-distinct so both units can run on the network at once without a hostname or
-entity collision.
+Both configs share the same sensor logic, fan thermal curve, syslog
+forwarding, and entity layout (restart button, uptime, fan-enable switch,
+sea-level pressure + trend) — only the pins, power path, and device name
+differ. The device names are kept distinct so both units can run on the
+network at once without a hostname or entity collision.
 
 ### Why the pins differ
 
@@ -93,10 +99,33 @@ flowchart TD
 ## Fan cooling
 
 Both variants drive a 2N2222-switched cooling fan (base via 330R, `GPIO2`)
-off the ESP32's internal temperature sensor: off below 45°C, ramping
-20%→100% duty between 45°C and 60°C, pinned at 100% at/above 60°C. A
-5-minute rolling average of fan duty is exposed for tuning those
-thresholds.
+off the ESP32's internal temperature sensor: off below 65°C, ramping
+20%→100% duty between 65°C and 100°C, pinned at 100% at/above 100°C. These
+thresholds were raised from an original 45°C/60°C after investigation
+showed the chip's own die sensor routinely runs in the 70s-90s°C range
+under normal WiFi activity alone — well within its 125°C max — so the
+lower thresholds were just reacting to routine radio activity rather than
+an actual thermal problem. A 5-minute rolling average of fan duty is
+exposed for tuning those thresholds, and a "Fan Enable" switch lets the fan
+be forced off entirely (e.g. for isolating whether the fan itself
+contributes to self-heating, or to save battery overnight).
+
+## Log forwarding, diagnostics, and remote control
+
+Both configs also include:
+
+- **Syslog forwarding** — the full ESPHome log stream is mirrored over UDP
+  (RFC 3164) to a home network syslog/Loki receiver, in addition to the
+  normal UART/API log output. Shared implementation in
+  [`syslog_forwarder.h`](syslog_forwarder.h); each config passes its own
+  device name in so forwarded messages are correctly attributed.
+- **Remote restart button** — lets Home Assistant reboot the device (e.g.
+  if it's stuck at 100% fan duty) without physically opening the enclosure.
+- **Uptime sensor** — diagnostic, exposed via the native API.
+- **Sea-level-adjusted pressure + 1-hour trend** — the raw BME280 station
+  pressure is corrected to sea level via the hypsometric formula (site
+  elevation 58m), with a 1-hour rolling tendency and a human-readable
+  category ("Rising slowly", "Falling quickly", etc.) exposed alongside it.
 
 ## Deep sleep
 
