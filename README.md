@@ -14,11 +14,17 @@ airflow) but new features land on the XIAO config first.
 | | [garden-weather-sensor-xiao.yaml](garden-weather-sensor-xiao.yaml) | [garden-weather-sensor-waveshare.yaml](garden-weather-sensor-waveshare.yaml) |
 |---|---|---|
 | Board | Seeed XIAO ESP32-C6 | Waveshare ESP32-C6-Zero |
-| I2C (BME280) | SDA `GPIO22`, SCL `GPIO23` | SDA `GPIO18`, SCL `GPIO19` |
-| Fan PWM | `GPIO2` | `GPIO2` |
-| Battery ADC | `GPIO0` | `GPIO0` |
+| I2C (BME280) | SDA `D4` (`GPIO22`), SCL `D5` (`GPIO23`) | SDA `GPIO18`, SCL `GPIO19` |
+| Fan PWM | `D2` (`GPIO2`) | `GPIO2` |
+| Battery ADC | `D0` (`GPIO0`) | `GPIO0` |
 | Battery charging | Built-in LiPo charge-management IC (charges over USB-C, auto switchover to battery) | None on-board — external CN3791 MPPT solar charge controller + 1S BMU |
 | ESPHome device name | `garden-weather-sensor` | `garden-weather-sensor-ws` |
+
+The XIAO's silkscreen labels its pins `D0`-`D10` rather than GPIO numbers, so
+XIAO pin references below give the `D`-label first (what you'll actually see
+printed on the board) with the underlying GPIO number — which is what
+appears in the YAML config — alongside it. The Waveshare Zero's silkscreen
+prints GPIO numbers directly, so no separate label is needed there.
 
 Both configs share the same sensor logic, fan thermal curve, syslog
 forwarding, and entity layout (restart button, uptime, fan-enable switch,
@@ -28,10 +34,10 @@ network at once without a hostname or entity collision.
 
 ### Why the pins differ
 
-The XIAO's default I2C pins (`GPIO22`/`GPIO23`) are hardwired on the
-Waveshare Zero to the onboard WS2812 RGB LED (`RGB_PWR` / `RGB_DATA`), so
-the waveshare variant moves I2C to `GPIO18`/`GPIO19` instead — free on that
-board, not strapping pins, not JTAG.
+The XIAO's default I2C pins (`D4`/`D5`, i.e. `GPIO22`/`GPIO23`) are
+hardwired on the Waveshare Zero to the onboard WS2812 RGB LED (`RGB_PWR` /
+`RGB_DATA`), so the waveshare variant moves I2C to `GPIO18`/`GPIO19`
+instead — free on that board, not strapping pins, not JTAG.
 
 ### Why the power path differs
 
@@ -49,8 +55,9 @@ max supply voltage if applied directly to 3V3. The onboard LDO regulates
 the 5V-pin input down to a clean 3.3V across the whole discharge range.
 
 Both variants sense battery voltage the same way: an external 220k/220k
-divider on the battery-voltage node, into `GPIO0` (ADC1_CH0), with a
-`multiply: 2.0` filter in the config to compensate.
+divider on the battery-voltage node, into `GPIO0` (`D0` on the XIAO,
+ADC1_CH0 on both), with a `multiply: 2.0` filter in the config to
+compensate.
 
 If you see random resets around WiFi TX bursts as the battery discharges,
 add a bulk capacitor (100–470µF) across 5V/GND or 3V3/GND near the board.
@@ -98,8 +105,8 @@ flowchart TD
 
 ## Fan cooling
 
-Both variants drive a 2N2222-switched cooling fan (base via 330R, `GPIO2`)
-off the ESP32's internal temperature sensor: off below 65°C, ramping
+Both variants drive a 2N2222-switched cooling fan (base via 330R, `GPIO2` —
+`D2` on the XIAO) off the ESP32's internal temperature sensor: off below 65°C, ramping
 20%→100% duty between 65°C and 100°C, pinned at 100% at/above 100°C. These
 thresholds were raised from an original 45°C/60°C after investigation
 showed the chip's own die sensor routinely runs in the 70s-90s°C range
