@@ -105,7 +105,7 @@ switch:
     restore_mode: RESTORE_DEFAULT_ON
     entity_category: config
 
-# --- BME280: temp, humidity, pressure ---
+# --- I2C sensors: BME280 (temp, humidity, pressure) + BH1750 (light) ---
 sensor:
   - platform: bme280_i2c
     address: 0x76      # try 0x77 if scan: true doesn't find it at 0x76
@@ -120,6 +120,18 @@ sensor:
     humidity:
       name: "Garden Humidity"
       oversampling: 16x
+    update_interval: 60s
+
+  # --- BH1750: ambient light (lux) ---
+  # Shares the I2C bus above with the BME280 - no extra GPIOs. Address 0x23
+  # with the module's ADDR pin left unconnected/low (0x5C if ADDR is tied to
+  # VCC); no conflict with the BME280 at 0x76. ESPHome auto-ranges the
+  # measurement time, so it covers dim dusk readings through full sun
+  # (~100k lx) without saturating.
+  - platform: bh1750
+    name: "Garden Illuminance"
+    id: bh1750_lux
+    address: 0x23
     update_interval: 60s
 
   # --- Sea-level-adjusted pressure ---
