@@ -1,6 +1,7 @@
 # Garden Weather Sensor
 
-ESPHome-based temperature/humidity/pressure sensor (BME280) with active fan
+ESPHome-based temperature/humidity/pressure sensor (BME280) and ambient
+light sensor (BH1750) with active fan
 cooling and battery voltage monitoring, for solar + battery powered outdoor
 use. Two board variants are provided.
 
@@ -14,7 +15,7 @@ airflow) but new features land on the XIAO config first.
 | | [garden-weather-sensor-xiao.yaml](garden-weather-sensor-xiao.yaml) | [garden-weather-sensor-waveshare.yaml](garden-weather-sensor-waveshare.yaml) |
 |---|---|---|
 | Board | Seeed XIAO ESP32-C6 | Waveshare ESP32-C6-Zero |
-| I2C (BME280) | SDA `D4` (`GPIO22`), SCL `D5` (`GPIO23`) | SDA `GPIO18`, SCL `GPIO19` |
+| I2C (BME280 + BH1750) | SDA `D4` (`GPIO22`), SCL `D5` (`GPIO23`) | SDA `GPIO18`, SCL `GPIO19` |
 | Fan PWM | `D2` (`GPIO2`) | `GPIO2` |
 | Battery ADC | `D0` (`GPIO0`) | `GPIO0` |
 | Battery charging | Built-in LiPo charge-management IC (charges over USB-C, auto switchover to battery) | None on-board — external CN3791 MPPT solar charge controller + 1S BMU |
@@ -87,6 +88,11 @@ flowchart TD
     GPIO18["GPIO18 (SDA)"] --> BMESDA["BME280 SDA"]
     GPIO19["GPIO19 (SCL)"] --> BMESCL["BME280 SCL"]
 
+    V33 --> BHVCC["BH1750 VCC"]
+    GND --> BHGND["BH1750 GND"]
+    GPIO18 --> BHSDA["BH1750 SDA"]
+    GPIO19 --> BHSCL["BH1750 SCL"]
+
     GPIO2["GPIO2 (Fan PWM)"] -->|330R| BASE["2N2222 Base"]
     BASE --> Q1(("2N2222"))
     Q1 -->|Collector| FANNEG["Fan −"]
@@ -98,10 +104,46 @@ flowchart TD
   battery node feeds the board's **5V pin** (not 3V3 — see above) and, through
   the 220k/220k divider, `GPIO0` for voltage sensing.
 - **BME280**: `3V3`/`GND` for power, `GPIO18`/`GPIO19` for I2C.
+- **BH1750**: wired in parallel with the BME280 on the same four nets
+  (`3V3`, `GND`, `GPIO18` SDA, `GPIO19` SCL). `ADDR` left unconnected.
 - **Fan**: `GPIO2` drives the 2N2222 base through a 330Ω resistor; the
   transistor switches the fan's ground return, with the fan's positive lead
   tied to 5V.
 - All `GND`/`GND common` nodes in the diagram are the same net.
+
+## Light sensor (BH1750)
+
+A ROHM BH1750 (typically the GY-302 breakout) reports ambient light in lux
+as **Garden Illuminance**. It shares the existing I2C bus with the BME280,
+so it needs no extra GPIOs — just four wires in parallel with the BME280:
+
+| BH1750 pin | XIAO ESP32-C6 | Waveshare ESP32-C6-Zero |
+|---|---|---|
+| `VCC` | `3V3` | `3V3` |
+| `GND` | `GND` | `GND` |
+| `SDA` | `D4` (`GPIO22`) | `GPIO18` |
+| `SCL` | `D5` (`GPIO23`) | `GPIO19` |
+| `ADDR` | leave unconnected (→ `0x23`) | leave unconnected (→ `0x23`) |
+
+- **Address**: `0x23` with `ADDR` low/floating (the GY-302 pulls it low);
+  tie `ADDR` to `VCC` for `0x5C` instead. Neither clashes with the BME280 at
+  `0x76`. `scan: true` in the config lists both at boot, which is a quick
+  way to confirm the wiring.
+- **Power from `3V3`, not `5V`/battery** — the chip's max is 4.5V, and the
+  bus must idle at 3.3V logic.
+- **Pull-ups**: both breakouts carry their own SDA/SCL pull-ups; in parallel
+  they're still fine at the default 50kHz bus speed. No extra resistors.
+- **Placement**: the BH1750 must see the sky, so it can't sit inside the
+  shaded radiation shield with the BME280. Mount it on top of the enclosure
+  under a clear/translucent cover (a clear dome or a disc of opal acrylic
+  works as a diffuser and keeps rain off), facing up and clear of any shade
+  from the enclosure itself. The cover reduces absolute lux a little, which
+  is fine for trends, dawn/dusk and cloud-cover detection.
+- **Cable length**: keep the I2C run to the sensor short (well under 1m) and
+  twist SDA with GND and SCL with 3V3 if it's more than a few cm. For longer
+  runs, lower `frequency` on the `i2c:` bus (e.g. `10kHz`).
+- **Range**: ESPHome auto-adjusts the BH1750's measurement time, so it reads
+  from deep dusk up to full summer sun (~100k lx) without saturating.
 
 ## Fan cooling
 
