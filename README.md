@@ -18,6 +18,7 @@ airflow) but new features land on the XIAO config first.
 | I2C (BME280 + BH1750) | SDA `D4` (`GPIO22`), SCL `D5` (`GPIO23`) | SDA `GPIO18`, SCL `GPIO19` |
 | Fan PWM | `D2` (`GPIO2`) | `GPIO2` |
 | Battery ADC | `D0` (`GPIO0`) | `GPIO0` |
+| RF switch / antenna | `GPIO3` LOW (FM8625H enable), `GPIO14` LOW (ceramic antenna; HIGH = U.FL) | Direct-wired ceramic antenna (no RF switch) |
 | Battery charging | Built-in LiPo charge-management IC (charges over USB-C, auto switchover to battery) | None on-board — external CN3791 MPPT solar charge controller + 1S BMU |
 | ESPHome device name | `garden-weather-sensor` | `garden-weather-sensor-ws` |
 
@@ -39,6 +40,20 @@ The XIAO's default I2C pins (`D4`/`D5`, i.e. `GPIO22`/`GPIO23`) are
 hardwired on the Waveshare Zero to the onboard WS2812 RGB LED (`RGB_PWR` /
 `RGB_DATA`), so the waveshare variant moves I2C to `GPIO18`/`GPIO19`
 instead — free on that board, not strapping pins, not JTAG.
+
+Additionally, the XIAO ESP32-C6 puts an **FM8625H RF switch** between the
+ESP32-C6 radio and its two antenna paths (onboard ceramic chip antenna vs.
+external U.FL connector), controlled by two internal GPIOs not broken out to
+the header pins:
+- `GPIO3` driven **LOW** powers/enables the FM8625H RF switch.
+- `GPIO14` driven **LOW** selects the onboard ceramic antenna (driving it
+  **HIGH** switches to the external U.FL connector).
+
+Because ESPHome compiles with the generic `esp32-c6-devkitc-1` board
+definition, neither pin is configured automatically; leaving them floating
+leaves the RF switch unpowered and attenuates WiFi signal by ~25–30 dB.
+`garden-weather-sensor-xiao.yaml` drives both `GPIO3` and `GPIO14` LOW at
+hardware initialization (`priority: 800`, before WiFi starts).
 
 ### Why the power path differs
 

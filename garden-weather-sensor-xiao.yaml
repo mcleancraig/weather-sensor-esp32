@@ -8,6 +8,20 @@ esphome:
   friendly_name: Garden Weather Sensor
   includes:
     - syslog_forwarder.h
+  # Seeed XIAO ESP32-C6 routes the ESP32-C6 radio through an onboard FM8625H
+  # RF switch (unlike the Waveshare ESP32-C6-Zero, which wires the ceramic
+  # antenna directly). Because we build with the generic esp32-c6-devkitc-1
+  # board definition, GPIO3 and GPIO14 are left unconfigured unless driven
+  # explicitly:
+  #   - GPIO3  LOW = enables FM8625H RF switch power
+  #   - GPIO14 LOW = selects the onboard ceramic antenna (HIGH = external U.FL)
+  # If left floating, the RF switch stays unpowered/unrouted (~25-30 dB loss).
+  # Drive both LOW at hardware init (priority 800, before WiFi starts at 250).
+  on_boot:
+    priority: 800
+    then:
+      - output.turn_off: rf_switch_en
+      - output.turn_off: antenna_select
 
 esp32:
   board: esp32-c6-devkitc-1
@@ -19,7 +33,10 @@ esp32:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
-  fast_connect: true   # helps battery-powered devices reconnect faster after deep sleep
+  # Full channel scan on connect (no fast_connect) so the sensor picks the
+  # strongest AP by RSSI rather than locking onto a weak cached BSSID, and
+  # disable post-connect roaming scans since this is a stationary outdoor node.
+  post_connect_roaming: false
 
   ap:
     ssid: "Garden-Weather-Fallback"
@@ -85,9 +102,19 @@ i2c:
   scl: GPIO23   # D5
   scan: true
 
-# --- Cooling fan PWM: 2N2222 base drive via 330R, GPIO2 (D2) ---
-# GPIO2 confirmed free — not used elsewhere in this config, not a strapping pin.
 output:
+  # --- Seeed XIAO ESP32-C6 FM8625H RF switch control ---
+  # GPIO3  LOW: enables onboard FM8625H RF switch power
+  # GPIO14 LOW: selects onboard ceramic antenna (HIGH selects external U.FL)
+  - platform: gpio
+    pin: GPIO3
+    id: rf_switch_en
+  - platform: gpio
+    pin: GPIO14
+    id: antenna_select
+
+  # --- Cooling fan PWM: 2N2222 base drive via 330R, GPIO2 (D2) ---
+  # GPIO2 confirmed free — not used elsewhere in this config, not a strapping pin.
   - platform: ledc
     pin: GPIO2
     id: fan_pwm
