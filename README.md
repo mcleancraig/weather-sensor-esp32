@@ -149,6 +149,48 @@ Both configs also include:
   elevation 58m), with a 1-hour rolling tendency and a human-readable
   category ("Rising slowly", "Falling quickly", etc.) exposed alongside it.
 
+## Battery life (XIAO)
+
+In winter the XIAO unit was browning out every night, somewhere between about
+20:30 and 02:00, and rebooting at about 08:30-09:15 once the panel picked up
+light (Loki, 17-24 Nov 2026). The config therefore cuts idle current without
+lowering the 60s weather reading rate:
+
+- **ESP-IDF automatic light sleep** (`power_management:` /
+  `esp32_power_management`, needs ESPHome >= 2026.11). The chip sleeps
+  between loop iterations and WiFi DTIM beacons while staying associated and
+  connected to the API. CPU is capped at 80MHz and drops to 40MHz when idle.
+  This is the main saving: the always-on CPU was most of the idle current.
+- **RF switch pins held** (`hold_state: true` on `GPIO3`/`GPIO14`) so the
+  FM8625H stays powered and on the ceramic antenna while the peripheral
+  power domain is down.
+- **Fan keeps the chip awake only while spinning.** LEDC PWM can't run in
+  light sleep, so [`pm_helpers.h`](pm_helpers.h) holds an
+  `ESP_PM_NO_LIGHT_SLEEP` lock whenever fan duty is above 0.
+- **Fewer wake-ups and transmits:** syslog drain every 1s (was 200ms); WiFi
+  signal every 5 min and uptime every 15 min (both diagnostics, were 60s).
+- **Fallback AP only after 15 min offline** (default 90s). It transmits at
+  full power while up, and a short router or switch outage was enough to
+  start it.
+
+Bench-check before deploying outdoors: WiFi stays connected and RSSI doesn't
+drop (proves the RF-switch hold), readings keep arriving every 60s, and
+forcing the fan on (e.g. lowering `TEMP_OFF` temporarily) gives steady PWM.
+Ideally measure battery current with a USB meter or µCurrent before and after.
+
+Not firmware, but worth doing:
+- **Battery voltage likely reads low.** The reported 2.7-3.4V is below the
+  range a LiPo can run the XIAO from. The 220k/220k divider is a high source
+  impedance for the ESP32 ADC's sampling capacitor. Add ~100nF from `D0` to
+  GND and check against a multimeter (then use `calibrate_linear`) before
+  relying on the value, e.g. for a low-battery cut-off.
+- **Weak WiFi** (median -76 dBm, down to -90) means more retries and longer
+  time on air. The XIAO has a U.FL connector (`GPIO14` HIGH selects it). An
+  external antenna, or an AP closer to the garden, cuts transmit energy.
+- **Winter energy budget:** even at midday the battery never reports more
+  than about 3.4V, so the panel isn't refilling it. A larger panel or cell
+  helps whatever the firmware does.
+
 ## Deep sleep
 
 Both configs include a commented-out `deep_sleep` block for battery-only
