@@ -8,6 +8,7 @@ esphome:
   friendly_name: Garden Weather Sensor
   includes:
     - syslog_forwarder.h
+    - pm_helpers.h
   # Seeed XIAO ESP32-C6 routes the ESP32-C6 radio through an onboard FM8625H
   # RF switch (unlike the Waveshare ESP32-C6-Zero, which wires the ceramic
   # antenna directly). Because we build with the generic esp32-c6-devkitc-1
@@ -29,6 +30,27 @@ esp32:
   framework:
     type: esp-idf
 
+# --- Power management (battery life) ---
+# The device stays on WiFi all the time (60s readings, native API). Without
+# power management the CPU runs flat out at 160MHz between WiFi beacons, which
+# accounts for most of the idle current. Turning on ESP-IDF automatic light
+# sleep lets the chip sleep between ESPHome loop iterations and WiFi DTIM
+# beacons, while the WiFi association and API connection stay up. The reading
+# rate is unchanged.
+#
+# - max_frequency 80MHz: plenty for this workload, and WiFi needs no more.
+#   When no PM lock is held the CPU drops to the 40MHz crystal clock.
+# - power_down_peripherals defaults to true on the C6. GPIO3/GPIO14 below use
+#   hold_state so the RF switch stays powered and on the ceramic antenna
+#   during sleep.
+# - The fan's LEDC PWM can't run during light sleep, so pm_helpers.h holds a
+#   no-light-sleep lock whenever fan duty is above 0 (normally it is 0).
+# Needs ESPHome >= 2026.11 (2026.9.0 has no esp32_power_management).
+power_management:
+  - platform: esp32_power_management
+    max_frequency: 80MHz
+    enable_light_sleep: true
+
 # --- WiFi ---
 wifi:
   ssid: !secret wifi_ssid
@@ -37,10 +59,19 @@ wifi:
   # strongest AP by RSSI rather than locking onto a weak cached BSSID, and
   # disable post-connect roaming scans since this is a stationary outdoor node.
   post_connect_roaming: false
+  # Modem sleep between DTIM beacons. Already the ESP32 default; set
+  # explicitly because automatic light sleep depends on it (NONE keeps the
+  # radio, and so the chip, awake all the time).
+  power_save_mode: LIGHT
 
+  # The fallback AP transmits beacons at full power the whole time it's up,
+  # and the default 90s timeout brings it up during any short WiFi outage
+  # (AP reboot, switch restart). Outdoors on a battery it's rarely useful, so
+  # only start it after 15 minutes without a connection.
   ap:
     ssid: "Garden-Weather-Fallback"
     password: !secret fallback_password
+    ap_timeout: 15min
 
 # NTP time, needed for real RFC 3164 timestamps on the syslog messages
 # below (a receiver-side parser rejected our earlier timestamp-less
@@ -76,7 +107,10 @@ logger:
           syslog_forwarder::enqueue(severity, tag, message);
 
 interval:
-  - interval: 200ms
+  # 1s rather than 200ms: steady-state traffic is a few lines a minute and
+  # drain() empties the whole 32-entry queue each call, so the faster poll
+  # just woke the CPU 5x/s for nothing.
+  - interval: 1s
     then:
       - lambda: |-
           auto now = id(sntp_time).now();
@@ -106,11 +140,19 @@ output:
   # --- Seeed XIAO ESP32-C6 FM8625H RF switch control ---
   # GPIO3  LOW: enables onboard FM8625H RF switch power
   # GPIO14 LOW: selects onboard ceramic antenna (HIGH selects external U.FL)
+  # hold_state keeps both levels latched through automatic light sleep
+  # (power_management above powers down the peripheral domain); without it
+  # the RF switch could drop out while the chip sleeps and WiFi would lose
+  # ~25-30 dB.
   - platform: gpio
-    pin: GPIO3
+    pin:
+      number: GPIO3
+      hold_state: true
     id: rf_switch_en
   - platform: gpio
-    pin: GPIO14
+    pin:
+      number: GPIO14
+      hold_state: true
     id: antenna_select
 
   # --- Cooling fan PWM: 2N2222 base drive via 330R, GPIO2 (D2) ---
@@ -225,14 +267,16 @@ sensor:
     entity_category: diagnostic
     update_interval: never
 
+  # Diagnostics only (the weather readings above stay at 60s). Each publish is
+  # a separate radio transmit, so these slow-changing values go out less often.
   - platform: wifi_signal
     name: "Garden Sensor WiFi Signal"
-    update_interval: 60s
+    update_interval: 5min
 
   - platform: uptime
     name: "Garden Sensor Uptime"
     id: uptime_sensor
-    update_interval: 60s
+    update_interval: 15min
     entity_category: diagnostic
 
   - platform: adc
@@ -293,6 +337,9 @@ sensor:
               duty = 0.0;
             }
 
+            // Keep the chip out of light sleep while the fan PWM is running
+            // (see pm_helpers.h). Take the lock before raising duty.
+            pm_helpers::set_fan_keeps_awake(duty > 0.0);
             id(fan_pwm).set_level(duty);
             id(fan_duty_pct).publish_state(duty * 100.0);
             id(fan_duty_avg).publish_state(duty * 100.0);
